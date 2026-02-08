@@ -1,0 +1,1062 @@
+//---- Utility repos
+var codedAPI = require("users/bullocke/coded:API/v2.0");
+
+//---- Global Variables
+
+//-- Objects to hold various components of application
+var APP = {};
+var WIDGETS = {};
+var PANELS = {};
+var INFO = {};
+var RESULTS = {};
+
+// Make example forest mask
+var exampleForestMask = ee.Image("users/bullocke/codedExamples/CODED_Example_Mask_Brazil")
+  .eq(1);
+exampleForestMask = exampleForestMask.where(exampleForestMask.mask().eq(0), 0);
+
+// Default parameters
+var PROPS = {
+  startDate: "1985-01-01",
+  endDate: "2020-01-01",
+  startDateCol: "2013-01-01",
+  startYearCODED: 2019,
+  endDateCol: "2024-01-01",
+  endYearCODED: 2023,
+  minDOY: 1,
+  maxDOY: 365,
+  sensor: "Landsat (Collection 2)",
+  endmemberGV: ".0500, .0900, .0400, .6100, .3000, .1000",
+  endmemberShade: "0, 0, 0, 0, 0, 0",
+  endmemberNPV: ".1400, .1700, .2200, .3000, .5500, .3000",
+  endmemberSoil: ".2000, .3000, .3400, .5800, .6000, .5800",
+  endmemberCloud: ".9000, .9600, .8000, .7800, .7200, .6500",
+  consec: 5,
+  chi2: 0.99,
+  minMag: 0.5,
+  numChanges: 5,
+  grids: false,
+  forestMask: "projects/ee-mbcol-miguelrestrepo/assets/TGFuegos/Mascara_B2019",//"users/bullocke/codedExamples/CODED_Example_Mask_Brazil",
+  forestMaskImage: ee.Image("projects/ee-mbcol-miguelrestrepo/assets/TGFuegos/Mascara_B2019")//"users/bullocke/codedExamples/CODED_Example_Mask_Brazil",
+    .unmask(0)
+    .eq(1),
+  forestMaskImageShown: false,
+  training:
+    "users/bullocke/codedExamples/CODED_Example_Training_Brazil_Predictors",
+  studyArea: "users/bullocke/codedExamples/CODED_Example_Extent_Brazil",
+  studyAreaGeo: ee.FeatureCollection(
+    "users/bullocke/codedExamples/CODED_Example_Extent_Brazil"
+  ),
+  studyAreaGeoShown: false,
+  buttonWidgetShown: false,
+  scale: 30,
+  layers: {
+    degradation: true,
+    deforestation: true,
+    magnitude: false,
+    stratification: true,
+    magnitudeDegradation: true,
+    magnitudeDeforestation: true,
+    rawOutput: false,
+  },
+};
+
+//-- Visualization parameters
+var HORIZONTALSTYLE = { stretch: "horizontal", width: "100%" };
+var VERTICALSTYLE = { stretch: "vertical", width: "100%" };
+var HORIZONTALWIDGETSTYLE = { stretch: "horizontal" };
+var SECTIONTITLEVIZ = {
+  fontWeight: "bold",
+  fontSize: "14px",
+  padding: "4px 4px 4px 4px",
+  border: "1px solid black",
+  color: "white",
+  backgroundColor: "black",
+  textAlign: "center",
+  stretch: "both",
+};
+
+//---- Helper functions
+
+// Make a panel that has a label and a widget controlling some parameter
+var makeParameterPanel = function (label, widget) {
+  var labelWidget = ui.Label({
+    value: label,
+    style: { stretch: "both", color: "black" },
+  }); //, width: '50%'
+  return ui.Panel(
+    [labelWidget, widget],
+    ui.Panel.Layout.Flow("horizontal"),
+    HORIZONTALWIDGETSTYLE
+  ); // maybe just {stretch: 'horizontal'})
+};
+
+// Get a widget from a panel holding multiple widgets, by default it gets the second.
+var getWidgetFromPanel = function (panel, index) {
+  index = index || 1;
+  return panel.widgets().get(index);
+};
+
+// Make subsection of control parameters
+var makeControlSubsectionPanel = function (title, widgets) {
+  var titleLabel = ui.Label(title, SECTIONTITLEVIZ);
+  var allWidgets = [titleLabel];
+  for (var i = 0; i < widgets.length; i++) {
+    allWidgets.push(widgets[i]);
+  }
+  var panel = ui.Panel({
+    style: { width: "100%" },
+    widgets: allWidgets,
+  });
+
+  return panel;
+};
+
+// Make an info box
+var makeInfoBox = function (title, text) {
+  var titleLabel = ui.Label(title, SECTIONTITLEVIZ);
+  var textWidget = ui.Label(text);
+  // var infoContainer = ui.Panel([titleLabel, textWidget], ui.Panel.Layout.Flow('vertical'), VERTICALSTYLE)
+  return ui.Panel(
+    [titleLabel, textWidget],
+    ui.Panel.Layout.Flow("vertical"),
+    VERTICALSTYLE
+  );
+};
+
+// Make a panel that has a label and a widget controlling some parameter and link to update info box
+var makeParameterPanelWithInfo = function (label, widget, infoPanel) {
+  var labelWidget = ui.Label({
+    value: label,
+    style: { stretch: "vertical", color: "black", width: "25%" },
+  });
+  var infoButton = ui.Button({
+    label: "Info",
+    onClick: function (button) {
+      if (!PROPS.buttonWidgetShown) {
+        PANELS.infoContainer.style().set("shown", true);
+        WIDGETS.toggleWidget.setLabel("➖");
+        PROPS.buttonWidgetShown = true;
+      }
+      PANELS.info.clear();
+      PANELS.info.add(infoPanel);
+    },
+    style: {
+      width: "55px",
+      textAlign: "center",
+      border: "1px solid black",
+    },
+  });
+  return ui.Panel(
+    [labelWidget, widget, infoButton],
+    ui.Panel.Layout.Flow("horizontal"),
+    HORIZONTALWIDGETSTYLE
+  ); // maybe just {stretch: 'horizontal'})
+};
+
+var parseEndmembers = function (widg) {
+  return widg
+    .getValue()
+    .split(",")
+    .map(function (f) {
+      return Number(f);
+    });
+};
+
+// Get input collection
+var getInputs = function (geo) {
+  geo = geo || PROPS.studyAreaGeo;
+  var endmembers = {
+    gv: parseEndmembers(WIDGETS.endmemberGV),
+    shade: parseEndmembers(WIDGETS.endmemberShade),
+    npv: parseEndmembers(WIDGETS.endmemberNPV),
+    soil: parseEndmembers(WIDGETS.endmemberSoil),
+    cloud: parseEndmembers(WIDGETS.endmemberCloud),
+  }; 
+
+  var inputParams = {
+    start: PROPS.startDateCol,
+    end: PROPS.endDateCol,
+    startDOY: PROPS.minDOY,
+    endDOY: PROPS.maxDOY,
+  };
+
+  if (PROPS.sensor == "Landsat (Collection 2)") {
+    inputParams.collection = 2;
+    inputParams.region = geo;
+    var collection = codedAPI.Inputs.getLandsatCol2(
+      inputParams.region,
+      inputParams.start,
+      inputParams.end
+    );
+    // inputParams.satelliteAttribute = 'SPACECRAFT_ID'
+  } else if (PROPS.sensor == "Landsat (Collection 1)") {
+    inputParams.collection = 1;
+    inputParams.region = geo;
+    var collection = codedAPI.Inputs.getLandsatCol1(
+      inputParams.region,
+      inputParams.start,
+      inputParams.end
+    );
+    // inputParams.satelliteAttribute = 'SATELLITE'
+  }
+  // } else if (PROPS.sensor == 'Sentinel-2') {
+  //   inputParams.studyArea = PROPS.studyAreaGeo
+  //   var collection = codedAPI.defaultS2(inputParams)
+  // }
+  collection = collection
+    .select(["BLUE", "GREEN", "RED", "NIR", "SWIR1", "SWIR2"])
+    .map(function (im) {
+      return codedAPI.Preprocess.unmix(im, endmembers);
+    });
+
+  return collection;
+};
+
+
+// Run CODED based on defined parameters
+var run = function () {
+  Map.layers().reset()
+  
+  //-- Study Area
+  PROPS.studyAreaGeo = ee.FeatureCollection(PROPS.studyArea).geometry();
+  Map.addLayer(PROPS.studyAreaGeo, {}, "Study Area");
+  Map.centerObject(PROPS.studyAreaGeo);
+
+  //-- Input collection
+  PROPS.collection = getInputs();
+
+  //-- Training data. Test whether or not the predictor data is already attached to each point.
+  var training = ee.FeatureCollection(PROPS.training);
+  var firstTrainingPoint = ee.Feature(training.first());
+  var trainingContainsPredictors = firstTrainingPoint
+    .propertyNames()
+    .contains("NDFI_INTP")
+    .getInfo();
+  if (trainingContainsPredictors) {
+    var prepTraining = false;
+  } else {
+    var prepTraining = true;
+    PANELS.warning.clear();
+    PANELS.warning.add(INFO.trainingWarning);
+    if (!PROPS.buttonWidgetShown) {
+      PANELS.infoContainer.style().set("shown", true);
+      WIDGETS.toggleWidget.setLabel("➖");
+      PROPS.buttonWidgetShown = true;
+    }
+  }
+
+  var codedParams = {
+    classBands: ["GV", "NPV", "Shade", "Soil", "NDFI"],
+    studyArea: PROPS.studyAreaGeo,
+    forestMask: ee.Image(PROPS.forestMask), // TODO
+    training: training, // TODO
+    collection: PROPS.collection,
+    minObservations: PROPS.consec,
+    chiSquareProbability: PROPS.chi2,
+    prepTraining: prepTraining,
+    startYear: PROPS.startYearCODED,
+    endYear: PROPS.endYearCODED,
+    forestValue: 1,
+  };
+
+  // Get raw CODED results
+  RESULTS.raw = codedAPI.ChangeDetection.CODED(codedParams);
+
+  // Create output dictionary to save with image
+  var outParams = ee
+    .Dictionary(PROPS.layers)
+    .combine(
+      ee.Dictionary(codedParams)
+        .remove([
+          "collection",
+          "training",
+          "studyArea",
+          "classBands",
+          "forestMask",
+        ])
+    )
+    .set("forestMask", PROPS.forestMask);
+
+  // Format output image
+  RESULTS.output = ee.Image(
+    codedAPI.PostProcess.prepOutput(
+      RESULTS.raw,
+      PROPS.layers,
+      PROPS.numChanges,
+      true,
+      true,
+      PROPS.startYearCODED - 1,
+      true
+    ).setMulti(outParams)
+  );
+
+  // Add a few layers to the map
+  if (PROPS.layers.stratification) {
+    Map.addLayer(
+      RESULTS.output.select("stratification"),
+      { min: 1, max: 5, palette: ["green", "black", "red", "cyan", "yellow"] },
+      "Stratification"
+    );
+  }
+
+  if (PROPS.layers.degradation) {
+    Map.addLayer(
+      RESULTS.output.select("degradation_1"),
+      { palette: ["cyan"] },
+      "First Degradation"
+    );
+  }
+
+  if (PROPS.layers.deforestation) {
+    Map.addLayer(
+      RESULTS.output.select("deforestation_1"),
+      { palette: ["red"] },
+      "First Deforestation"
+    );
+  }
+  Export.image.toAsset({
+    image: RESULTS.output,
+    scale: 30,
+    region: PROPS.studyAreaGeo,
+    description: "CODED_Output",
+    maxPixels: 1e13,
+  });
+};
+
+//---- Descriptions about panels
+INFO.initialWarning = makeInfoBox(
+  "Warnings",
+  "Warnings and other comments will appear here."
+);
+INFO.initialDescription = makeInfoBox(
+  "Parameter Descriptions",
+  'Click on the "Info" button next to a parameter to read more information about it here'
+);
+
+//-- Subsection 1: Temporal filters
+
+INFO.startDate = makeInfoBox(
+  "Start Date",
+  "The first date that a change can be detected. CODED will initiate one year prior to the start date, but only changes after this date will be saved."
+);
+INFO.endDate = makeInfoBox(
+  "End Date",
+  "The last date that a change can be detected."
+);
+INFO.minDOY = makeInfoBox(
+  "Minimum Day of Year",
+  "The first day of year to filter the input collection."
+);
+INFO.maxDOY = makeInfoBox(
+  "Maximum Day of Year",
+  "The final day of year to filter the input collection."
+);
+
+//-- Subsection 2: Sensor and pre-processing
+INFO.sensor = makeInfoBox(
+  "Input collection",
+  "Either Landsat (Collection 1), Landsat (Collection 2), or Sentinel-2 can be used for running CODED."
+);
+INFO.endmemberGV = makeInfoBox(
+  "Endmembers (Green Vegetation)",
+  "Reflectance values for the blue, green, red, near-infared, shortwave infrared 1 and shortwave infrared 2 bands for the Green Vegetation endmember."
+);
+INFO.endmemberSoil = makeInfoBox(
+  "Endmembers (Soil)",
+  "Reflectance values for the blue, green, red, near-infared, shortwave infrared 1 and shortwave infrared 2 bands for the Soil endmember."
+);
+INFO.endmemberShade = makeInfoBox(
+  "Endmembers (Shade)",
+  "Reflectance values for the blue, green, red, near-infared, shortwave infrared 1 and shortwave infrared 2 bands for the Green Vegetation endmember."
+);
+INFO.endmemberNPV = makeInfoBox(
+  "Endmembers (Non-Photosynthetic Vegetation)",
+  "Reflectance values for the blue, green, red, near-infared, shortwave infrared 1 and shortwave infrared 2 bands for the Non-Photosynthetic Vegetation endmember."
+);
+INFO.endmemberCloud = makeInfoBox(
+  "Endmembers (Cloud)",
+  "Reflectance values for the blue, green, red, near-infared, shortwave infrared 1 and shortwave infrared 2 bands for the Cloud endmember."
+);
+
+//-- Subsection 3: Study Area
+INFO.useAssets = makeInfoBox(
+  "Study Area Assets",
+  "Use Google Earth Engine Assets to define the study area and forest mask rather than the Hansen (GFW) dataset."
+);
+INFO.studyArea = makeInfoBox(
+  "Study Area",
+  "The study area is defined by the geometry of an Earth Engine Feature Collection asset."
+);
+INFO.forestMask = makeInfoBox(
+  "Forest Mask",
+  "An image asset in which a value of 1 is a forest at the beginning of the monitoring period and a value of 2 is non-forest. Disturbances will only be identified in pixels labeled as 1 (forest) in the forest mask."
+);
+
+//-- Subsection 4: CODED parameters
+INFO.consec = makeInfoBox(
+  "Consecutive Observations",
+  'The minimum number of consecutive observations ("Consec") that exceed the change threshold to detect a change. If Consec = 5, then there need to be five consecutive observations exceeding the change threshold to trigger a change. A lower Consec value is recommended for study areas with low data availability or for finding changes that are visible from above for a short duration. An example of the latter would be a selective logging event that, due to canopy regeneration, can only be seen from above for a few weeks or months. Reducing the Consec parameter may help in finding change, but will also make the results more susceptible to errors of commission due to unmasked clouds or cloud shadows.'
+);
+INFO.chi2 = makeInfoBox(
+  "chiSquareProbability",
+  "The chiSquareProbability defines the size of the statistical window for identifying change. A lower chiSquareProbability has the effect of increasing the sensitivity of CODED to change, thus finding more changes than using a higher chiSquareProbability. A statistical definition of the chiSquareProbability can be found in the CODED OpenMRV tutorial (Section 2.6)."
+);
+INFO.training = makeInfoBox(
+  "Training Data",
+  'A Feature Collection asset with point geometries. The collection must have two attributes: "landcover" and "year". The "landcover" attribute must have a value of 1 for forest or 2 for non-forest. The "year" attribute must have the year associated with the change label. The training year must be within the date range defined by the "Start Date" and "End Date" parameters.'
+);
+INFO.trainingWarning = makeInfoBox(
+  "Note!",
+  "The training data does not have the predictor data for each point. A task has been initiated to export a version of the training data with the predictor information. Specifying this new asset as the training data will make future runs significantly faster."
+);
+
+//-- Subsection 5: Post-processing
+INFO.minMag = makeInfoBox(
+  "Minimum Change Magnitude",
+  "The minimum absolute value of the change magnitude to filter disturbance events. Change magnitude relates to change in data space (NDFI). For example, a disturbance that causes a large change in NDFI will have a larger change magnitude than a subtle change that results in a minor change in NDFI. The units of change magnitude are the residuals during the model change window normalized by the model root-mean-squared error. In general a larger threshold will remove more changes, and a threshold of 0 will remove no changes. For example, A value of 1 would filter very low-magnitude changes, while a value of 8 would filter everything but high-magnitude change."
+);
+
+//-- Subsection 6: Outputs
+INFO.numChanges = makeInfoBox(
+  "Number of Changes",
+  'The number of deforestation and degradation events to export. If this parameter is true, and the "degradation" export layer is selected, then the first two degradation dates with be saved. If both "degradation" and "deforestation" are selected, then both the first two degradation and deforestation dates will be saved.'
+);
+INFO.degradation = makeInfoBox(
+  "Dates of Degradation",
+  'A band will be saved for the first n degradation events, with n defined by the "Number of Changes" parameter.'
+);
+INFO.deforestation = makeInfoBox(
+  "Dates of Deforestation",
+  'A band will be saved for the first n deforestation events, with n defined by the "Number of Changes" parameter.'
+);
+INFO.stratification = makeInfoBox(
+  "Stratification",
+  "A single band that summarizes changes over the study period The pixel values are stable forest (1), non forest (2), degradation (3), deforestation (4), and unknown disturbance (5). Deforestation takes precedent to degradation if both occur in the same location."
+);
+INFO.magnitude = makeInfoBox(
+  "Change Magnitude",
+  'Change magnitude relates to change in data space (NDFI). A disturbance that causes a large change in NDFI will have a larger change magnitude than a subtle change that results in a minor change in NDFI. The number of change magnitude bands will be exported based on the "Number of Changes" parameter.'
+);
+INFO.grids = makeInfoBox(
+  "Export in Grids",
+  "Split the results into grids, and submit a different Task for each one. This can be useful for running CODED over very large areas, in which a single task may fail."
+);
+INFO.magnitudeDegradation = makeInfoBox(
+  "Change Magnitude (Degradation Only)",
+  'Change magnitude of degradation events only. See "magnitude" info box for more information on change magnitude.'
+);
+INFO.magnitudeDeforestation = makeInfoBox(
+  "Change Magnitude (Deforestation Only)",
+  'Change magnitude of deforestation events only. See "magnitude" info box for more information on change magnitude.'
+);
+
+//---- Widgets and the panels that hold them
+
+//-- Subsection 1: Temporal filters
+
+// Start date parameter // get year for CODED startYear
+WIDGETS.startDate = ui.Textbox(
+  PROPS.startDate,
+  PROPS.startDate,
+  function (text, widg) {
+    PROPS.startDate = text;
+    PROPS.startYearCODED = Number(text.split("-")[0]);
+    PROPS.startDateCol = String(PROPS.startYearCODED - 1) + "-01-01";
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.startDate = makeParameterPanelWithInfo(
+  "Start Date: ",
+  WIDGETS.startDate,
+  INFO.startDate
+);
+
+// End date parameter
+WIDGETS.endDate = ui.Textbox(
+  PROPS.endDate,
+  PROPS.endDate,
+  function (text, widg) {
+    PROPS.endDate = text;
+    PROPS.endYearCODED = Number(text.split("-")[0]);
+    PROPS.endDateCol = String(PROPS.endYearCODED + 1) + "-01-01";
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.endDate = makeParameterPanelWithInfo(
+  "End Date: ",
+  WIDGETS.endDate,
+  INFO.endDate
+);
+
+// Minimum day of year parameter
+WIDGETS.minDOY = ui.Textbox(
+  PROPS.minDOY,
+  PROPS.minDOY,
+  function (text, widg) {
+    PROPS.minDOY = text;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.minDOY = makeParameterPanelWithInfo(
+  "Start DOY: ",
+  WIDGETS.minDOY,
+  INFO.minDOY
+);
+
+WIDGETS.maxDOY = ui.Textbox(
+  PROPS.maxDOY,
+  PROPS.maxDOY,
+  function (text, widg) {
+    PROPS.maxDOY = text;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.maxDOY = makeParameterPanelWithInfo(
+  "End DOY: ",
+  WIDGETS.maxDOY,
+  INFO.maxDOY
+);
+
+//-- Subsection 2: Sensor and pre-processing
+WIDGETS.sensor = ui.Select({
+  items: ["Landsat (Collection 1)", "Landsat (Collection 2)", "Sentinel-2"],
+  placeholder: "Landsat (Collection 2)",
+  value: "Landsat (Collection 2)",
+  onChange: function (text, widg) {
+    PROPS.sensor = text;
+  },
+  style: HORIZONTALWIDGETSTYLE,
+});
+PANELS.sensor = makeParameterPanelWithInfo(
+  "Input Collection: ",
+  WIDGETS.sensor,
+  INFO.sensor
+);
+
+// Endmembers
+WIDGETS.endmemberGV = ui.Textbox(
+  PROPS.endmemberGV,
+  PROPS.endmemberGV,
+  function (text, widg) {
+    PROPS.endmemberGV = text;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.endmemberGV = makeParameterPanelWithInfo(
+  "GV Endmember: ",
+  WIDGETS.endmemberGV,
+  INFO.endmemberGV
+);
+
+WIDGETS.endmemberSoil = ui.Textbox(
+  PROPS.endmemberSoil,
+  PROPS.endmemberSoil,
+  function (text, widg) {
+    PROPS.endmemberSoil = text;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.endmemberSoil = makeParameterPanelWithInfo(
+  "Soil Endmember: ",
+  WIDGETS.endmemberSoil,
+  INFO.endmemberSoil
+);
+
+WIDGETS.endmemberShade = ui.Textbox(
+  PROPS.endmemberShade,
+  PROPS.endmemberShade,
+  function (text, widg) {
+    PROPS.endmemberShade = text;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.endmemberShade = makeParameterPanelWithInfo(
+  "Shade Endmember: ",
+  WIDGETS.endmemberShade,
+  INFO.endmemberShade
+);
+
+WIDGETS.endmemberNPV = ui.Textbox(
+  PROPS.endmemberNPV,
+  PROPS.endmemberNPV,
+  function (text, widg) {
+    PROPS.endmemberNPV = text;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.endmemberNPV = makeParameterPanelWithInfo(
+  "NPV Endmember: ",
+  WIDGETS.endmemberNPV,
+  INFO.endmemberNPV
+);
+
+WIDGETS.endmemberCloud = ui.Textbox(
+  PROPS.endmemberCloud,
+  PROPS.endmemberCloud,
+  function (text, widg) {
+    PROPS.endmemberCloud = text;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.endmemberCloud = makeParameterPanelWithInfo(
+  "Cloud Endmember: ",
+  WIDGETS.endmemberCloud,
+  INFO.endmemberCloud
+);
+
+//-- Subsection 3: Study area
+WIDGETS.useAssets = ui.Checkbox({
+  label: "Use Assets For Study Area",
+  value: true,
+  onChange: function () {
+    print("TODO");
+  },
+});
+PANELS.useAssets = makeParameterPanelWithInfo(
+  "",
+  WIDGETS.useAssets,
+  INFO.useAssets
+);
+
+WIDGETS.studyArea = ui.Textbox(
+  PROPS.studyArea,
+  PROPS.studyArea,
+  function (text, widg) {
+    PROPS.studyArea = text;
+    PROPS.studyAreaGeo = ee.FeatureCollection(text).geometry();
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.studyArea = makeParameterPanelWithInfo(
+  "Study Area Asset: ",
+  WIDGETS.studyArea,
+  INFO.studyArea
+);
+
+// Show on map button
+var showStudyAreaButton = ui.Button({
+  label: "🗺️",
+  onClick: function (button) {
+    Map.centerObject(PROPS.studyAreaGeo, 6);
+    if (!PROPS.studyAreaGeoShown) {
+      PROPS.studyAreaGeoImage = ee.Image(0)
+        .paint(ee.FeatureCollection(PROPS.studyArea), 1, 2)
+        .selfMask();
+      Map.addLayer(PROPS.studyAreaGeoImage, {}, "Study Area");
+      PROPS.studyAreaGeoShown = true;
+    }
+  },
+  style: {
+    width: "55px",
+    textAlign: "center",
+    border: "1px solid black",
+  },
+});
+PANELS.studyArea.widgets().add(showStudyAreaButton);
+
+WIDGETS.forestMask = ui.Textbox(
+  PROPS.forestMask,
+  PROPS.forestMask,
+  function (text, widg) {
+    PROPS.forestMask = text;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.forestMask = makeParameterPanelWithInfo(
+  "Forest Mask Asset: ",
+  WIDGETS.forestMask,
+  INFO.forestMask
+);
+
+var showForestMaskButton = ui.Button({
+  label: "🗺️",
+  onClick: function (button) {
+    Map.centerObject(PROPS.studyAreaGeo, 6);
+    if (!PROPS.forestMaskImageShown) {
+      PROPS.studyAreaGeoImage = ee.Image(0)
+        .paint(ee.FeatureCollection(PROPS.studyArea), 1, 2)
+        .selfMask();
+      Map.addLayer(
+        PROPS.forestMaskImage,
+        { min: 0, max: 1, palette: ["#faf3dd", "#4a7c59"] },
+        "Forest Mask"
+      );
+      PROPS.forestMaskImageShown = true;
+    }
+  },
+  style: {
+    width: "55px",
+    textAlign: "center",
+    border: "1px solid black",
+  },
+});
+PANELS.forestMask.widgets().add(showForestMaskButton);
+
+//-- Subsection 4: CODED parameters
+WIDGETS.consec = ui.Textbox(
+  PROPS.consec,
+  PROPS.consec,
+  function (text, widg) {
+    PROPS.consec = Number(text);
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.consec = makeParameterPanelWithInfo(
+  "Consecutive Observations: ",
+  WIDGETS.consec,
+  INFO.consec
+);
+
+WIDGETS.chi2 = ui.Textbox(
+  PROPS.chi2,
+  PROPS.chi2,
+  function (text, widg) {
+    PROPS.chi2 = Number(text);
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.chi2 = makeParameterPanelWithInfo(
+  "chiSquareProbability: ",
+  WIDGETS.chi2,
+  INFO.chi2
+);
+
+WIDGETS.training = ui.Textbox(
+  PROPS.training,
+  PROPS.training,
+  function (text, widg) {
+    PROPS.training = text;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.training = makeParameterPanelWithInfo(
+  "Training Data Asset: ",
+  WIDGETS.training,
+  INFO.training
+);
+
+//-- Subsection 5: Post-Processing
+WIDGETS.minMag = ui.Textbox(
+  PROPS.minMag,
+  PROPS.minMag,
+  function (text, widg) {
+    PROPS.minMag = text;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.minMag = makeParameterPanelWithInfo(
+  "Minimum Change Magnitude: ",
+  WIDGETS.minMag,
+  INFO.minMag
+);
+
+//-- Subsection 6: Outputs
+WIDGETS.numChanges = ui.Textbox(
+  PROPS.numChanges,
+  PROPS.numChanges,
+  function (text, widg) {
+    PROPS.numChanges = Number(text);
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.numChanges = makeParameterPanelWithInfo(
+  "Number of Changes: ",
+  WIDGETS.numChanges,
+  INFO.numChanges
+);
+
+WIDGETS.degradation = ui.Checkbox(
+  "",
+  PROPS.layers.degradation,
+  function (bool, widg) {
+    PROPS.layers.degradation = bool;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.degradation = makeParameterPanelWithInfo(
+  "Degradation: ",
+  WIDGETS.degradation,
+  INFO.degradation
+);
+
+WIDGETS.deforestation = ui.Checkbox(
+  "",
+  PROPS.layers.deforestation,
+  function (bool, widg) {
+    PROPS.layers.deforestation = bool;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.deforestation = makeParameterPanelWithInfo(
+  "Deforestation: ",
+  WIDGETS.deforestation,
+  INFO.deforestation
+);
+
+WIDGETS.stratification = ui.Checkbox(
+  "",
+  PROPS.layers.stratification,
+  function (bool, widg) {
+    PROPS.layers.stratification = bool;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.stratification = makeParameterPanelWithInfo(
+  "Stratification: ",
+  WIDGETS.stratification,
+  INFO.stratification
+);
+
+WIDGETS.magnitude = ui.Checkbox(
+  "",
+  PROPS.layers.magnitude,
+  function (bool, widg) {
+    PROPS.layers.magnitude = bool;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.magnitude = makeParameterPanelWithInfo(
+  "Change Magnitude: ",
+  WIDGETS.magnitude,
+  INFO.magnitude
+);
+
+WIDGETS.magnitudeDegradation = ui.Checkbox(
+  "",
+  PROPS.layers.magnitudeDegradation,
+  function (bool, widg) {
+    PROPS.layers.magnitudeDegradation = bool;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.magnitudeDegradation = makeParameterPanelWithInfo(
+  "Degradation Magnitude: ",
+  WIDGETS.magnitudeDegradation,
+  INFO.magnitudeDegradation
+);
+
+WIDGETS.magnitudeDeforestation = ui.Checkbox(
+  "",
+  PROPS.layers.magnitudeDeforestation,
+  function (bool, widg) {
+    PROPS.layers.magnitudeDeforestation = bool;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.magnitudeDeforestation = makeParameterPanelWithInfo(
+  "Deforestation Magnitude: ",
+  WIDGETS.magnitudeDeforestation,
+  INFO.magnitudeDeforestation
+);
+
+WIDGETS.grids = ui.Checkbox(
+  "",
+  PROPS.grids,
+  function (bool, widg) {
+    PROPS.grids = bool;
+  },
+  false,
+  HORIZONTALWIDGETSTYLE
+);
+PANELS.grids = makeParameterPanelWithInfo(
+  "Export in Grids: ",
+  WIDGETS.grids,
+  INFO.grids
+);
+
+//-- A button to run CODED
+WIDGETS.runCODED = ui.Button("Run CODED", run, false, {
+  border: "1px solid black",
+  fontWeight: "bold",
+  width: "97%",
+});
+
+//---- Panels
+
+// Main panel to hold map, parameter tools, and other panels
+PANELS.main = ui.Panel();
+
+// // Panel to hold information about parameters
+PANELS.info = ui.Panel({
+  layout: ui.Panel.Layout.Flow("vertical"),
+  widgets: [INFO.initialDescription],
+});
+
+PANELS.warning = ui.Panel({
+  layout: ui.Panel.Layout.Flow("vertical"),
+  widgets: [INFO.initialWarning],
+});
+
+PANELS.infoContainer = ui.Panel(
+  [PANELS.info, PANELS.warning],
+  ui.Panel.Layout.Flow("vertical"),
+  VERTICALSTYLE
+);
+PANELS.infoContainer.style().set("shown", false);
+
+WIDGETS.infoLabel = ui.Label("More Info", {
+  fontWeight: "bold",
+  position: "bottom-right",
+});
+
+WIDGETS.toggleWidget = ui.Button({
+  label: "➕",
+  onClick: function (buttonWidget) {
+    if (PROPS.buttonWidgetShown) {
+      PANELS.infoContainer.style().set("shown", false);
+      buttonWidget.setLabel("➕");
+      PROPS.buttonWidgetShown = false;
+    } else {
+      PANELS.infoContainer.style().set("shown", true);
+      buttonWidget.setLabel("➖");
+      PROPS.buttonWidgetShown = true;
+    }
+  },
+});
+
+PANELS.toggleHorizontal = ui.Panel({
+  widgets: [WIDGETS.infoLabel, WIDGETS.toggleWidget],
+  style: {
+    fontSize: "5px",
+    margin: "auto 4px auto auto",
+  },
+  layout: ui.Panel.Layout.Flow("horizontal"),
+});
+
+PANELS.help = ui.Panel({
+  layout: ui.Panel.Layout.Flow("vertical"),
+  style: { position: "bottom-right", maxWidth: "40%", stretch: "both" }, //minWidth: '10%'
+  widgets: [PANELS.toggleHorizontal, PANELS.infoContainer],
+});
+
+// Subsections
+PANELS.subsectionDates = makeControlSubsectionPanel("Temporal Filters", [
+  PANELS.startDate,
+  PANELS.endDate,
+  PANELS.minDOY,
+  PANELS.maxDOY,
+]);
+PANELS.subsectionInputs = makeControlSubsectionPanel("Inputs", [
+  PANELS.sensor,
+  PANELS.endmemberGV,
+  PANELS.endmemberSoil,
+  PANELS.endmemberShade,
+  PANELS.endmemberNPV,
+  PANELS.endmemberCloud,
+]);
+// PANELS.subsectionStudyArea = makeControlSubsectionPanel('Study Area', [PANELS.useAssets, PANELS.studyArea,PANELS.forestMask])
+// TO do: draw study area
+PANELS.subsectionStudyArea = makeControlSubsectionPanel("Study Area", [
+  PANELS.studyArea,
+  PANELS.forestMask,
+]);
+
+PANELS.subsectionCODED = makeControlSubsectionPanel(
+  "Change Detection and Attribution",
+  [PANELS.consec, PANELS.chi2, PANELS.training]
+);
+PANELS.subsectionPP = makeControlSubsectionPanel("Post-Processing", [
+  PANELS.minMag,
+]);
+PANELS.subsectionOutput = makeControlSubsectionPanel("Outputs", [
+  PANELS.numChanges,
+  PANELS.degradation,
+  PANELS.deforestation,
+  PANELS.stratification,
+  PANELS.magnitude,
+  PANELS.magnitudeDegradation,
+  PANELS.magnitudeDeforestation,
+  PANELS.grids,
+]);
+
+// Parameter controls
+PANELS.controls = ui.Panel({
+  style: { width: "30%" },
+  widgets: [
+    PANELS.subsectionDates,
+    PANELS.subsectionInputs,
+    PANELS.subsectionStudyArea,
+    PANELS.subsectionCODED,
+    PANELS.subsectionPP,
+    PANELS.subsectionOutput,
+    WIDGETS.runCODED,
+  ],
+
+  layout: ui.Panel.Layout.Flow("vertical"),
+});
+
+WIDGETS.tsLabelStart = ui.Label({
+  value: "Click on the map to display Landsat NDFI time series data",
+  style: {
+    fontWeight: "bold",
+    fontSize: "24px",
+    // stretch: 'horizontal',
+    textAlign: "center",
+    stretch: "both",
+  },
+});
+PANELS.tsLabelContainer = ui.Panel({
+  widgets: WIDGETS.tsLabelStart,
+
+  // layout: ui.Panel.Layout.absolute(),
+  style: { width: "100%" },
+});
+
+// Make time series panel
+PANELS.ts = ui.Panel({
+  widgets: [PANELS.tsLabelContainer],
+  layout: ui.Panel.Layout.flow("vertical"),
+  style: { stretch: "both" },
+});
+
+PANELS.mapPanel = ui.root.widgets().get(0);
+PANELS.mapPanel.style().set("height", "70%");
+PANELS.mapPanel.add(PANELS.help);
+PANELS.mapPanel.setOptions({ mapTypeId: "SATELLITE" });
+
+// Callback for time series panel
+Map.onClick(function (coords) {
+  var geo = ee.Geometry.Point([coords.lon, coords.lat]);
+  var chartParams = {
+    geometry: geo,
+    collection: getInputs(geo),
+    panel: PANELS.ts,
+    scale: PROPS.scale,
+    band: "NDFI",
+    longitude: coords.lon,
+    latitude: coords.lat,
+  };
+  codedAPI.Charts.chartData(chartParams, PANELS.mapPanel);
+});
+
+PANELS.rightPanel = ui.Panel([
+  ui.SplitPanel(PANELS.mapPanel, PANELS.ts, "vertical"),
+]);
+
+// The full app. The default first widget of ui.root is the Map.
+var app = ui.SplitPanel(PANELS.controls, PANELS.rightPanel, "horizontal");
+
+ui.root.widgets().reset([app]);
